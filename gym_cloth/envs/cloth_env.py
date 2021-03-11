@@ -3,6 +3,8 @@ An OpenAI Gym-style environment for the cloth smoothing experiments. It's not
 exactly their interface because we pass in a configuration file. See README.md
 document in this directory for details.
 """
+import pyximport; pyximport.install()
+
 import gym
 from gym import error, spaces, utils
 from gym.utils import seeding
@@ -208,6 +210,13 @@ class ClothEnv(gym.Env):
                 return self.get_blender_rep(self._use_depth)
         else:
             raise ValueError(self._obs_type)
+
+    @property
+    def obs_1d(self):
+        lst = []
+        for pt in self.cloth.pts:
+            lst.append(np.array([pt.x, pt.y, pt.z]))
+        return np.array(lst)
 
     def get_blender_rep(self, use_depth):
         """Ryan: put get_blender_rep in its own method so we can easily get RGBD images."""
@@ -493,9 +502,12 @@ class ClothEnv(gym.Env):
             iterations = 0
 
         i = 0
+        cloth_3d_obs = []
+        # Iterate T times to perform pulling in the diretion of X and Y
         while i < iterations:
             self._pull(i, iters_pull, x_dir_r, y_dir_r)
             self.cloth.update()
+            cloth_3d_obs.append(self.obs_1d)
             if not initialize:
                 self.num_sim_steps += 1
 
@@ -515,7 +527,7 @@ class ClothEnv(gym.Env):
             i += 1
 
         if initialize:
-            return
+            return cloth_3d_obs
         self.num_steps += 1
         rew  = self._reward(action, exit_early)
         term = self._terminal()
@@ -530,6 +542,7 @@ class ClothEnv(gym.Env):
             'start_variance_inv': self._start_variance_inv,
             'have_tear': self.have_tear,
             'out_of_bounds': self._out_of_bounds(),
+            'obs_1d': cloth_3d_obs
         }
         return self.state, rew, term, info
 
@@ -769,7 +782,7 @@ class ClothEnv(gym.Env):
 
         # Handle starting states, assuming we don't already have one.
         if not self._start_state:
-            self._reset_actions()
+            cloth_3d_obs = self._reset_actions()
 
         reset_time = (time.time() - reset_start) / 60.0
         logger.debug("Done with initial state, {:.2f} minutes".format(reset_time))
@@ -793,7 +806,7 @@ class ClothEnv(gym.Env):
         self.dom_rand_params['camera_deg'] = np.random.normal(0., scale=0.90, size=(3,))
         self.dom_rand_params['specular_max'] = np.random.uniform(low=0.0, high=0.0) # check get_image_rep_279.py for 'high'
         obs = self.state
-        return obs
+        return obs, cloth_3d_obs
 
     def _reset_actions(self):
         """Helper for reset in case reset applies action.
@@ -821,6 +834,11 @@ class ClothEnv(gym.Env):
         logger = self.logger
         cfg = self.cfg
         init_side = 1 if self.cloth.init_side else -1
+
+        # Create a list to store all the cloth transitions
+        cloth_3d_obs = []
+        # Get the initial state of the cloth
+        cloth_3d_obs.append(self.obs_1d)
 
         def _randval_minabs(low, high, minabs=None):
             # Helper to handle ranges with minabs requirements.
@@ -861,7 +879,8 @@ class ClothEnv(gym.Env):
             else:
                 raise NotImplementedError()
             action0 = self._convert_action_to_clip_space(action0)
-            self.step(action0, initialize=True)
+            cloth_1d = self.step(action0, initialize=True)
+            cloth_3d_obs.extend(cloth_1d)
 
             # Second pull.
             p1 = self.cloth.pts[ self.np_random.randint(len(self.cloth.pts)) ]
@@ -874,7 +893,8 @@ class ClothEnv(gym.Env):
             else:
                 raise NotImplementedError()
             action1 = self._convert_action_to_clip_space(action1)
-            self.step(action1, initialize=True)
+            cloth_1d = self.step(action1, initialize=True)
+            cloth_3d_obs.extend(cloth_1d)
 
             # Third pull if the cloth looks too flat.
             if self._compute_coverage() >= 0.90:
@@ -888,7 +908,8 @@ class ClothEnv(gym.Env):
                 else:
                     raise NotImplementedError()
                 action2 = self._convert_action_to_clip_space(action2)
-                self.step(action2, initialize=True)
+                cloth_1d = self.step(action2, initialize=True)
+                cloth_3d_obs.extend(cloth_1d)
 
         elif self._init_type == 'tier2':
             # ------------------------------------------------------------------
@@ -901,6 +922,7 @@ class ClothEnv(gym.Env):
             # ------------------------------------------------------------------
             for i in range(1500):
                 self.cloth.update()
+                cloth_3d_obs.append(self.obs_1d)
             logger.debug("Cloth settled, now apply actions.")
 
             # Pick one of the two topmost corners ('top' -1, 'bottom' -25).
@@ -919,7 +941,8 @@ class ClothEnv(gym.Env):
             else:
                 raise NotImplementedError()
             action0 = self._convert_action_to_clip_space(action0)
-            self.step(action0, initialize=True)
+            cloth_1d = self.step(action0, initialize=True)
+            cloth_3d_obs.extend(cloth_1d)
 
             # Now attempt to cover that corner. Here we can have a slightly
             # longer range of dx0, also make dy0 now reverse of earlier, but
@@ -942,11 +965,13 @@ class ClothEnv(gym.Env):
                 else:
                     raise NotImplementedError()
                 action1 = self._convert_action_to_clip_space(action1)
-            self.step(action1, initialize=True)
+            cloth_1d = self.step(action1, initialize=True)
+            cloth_3d_obs.extend(cloth_1d)
 
             logger.debug("Let's continue simulating to finish the reset().")
             for i in range(500):
                 self.cloth.update()
+                cloth_3d_obs.append(self.obs_1d)
 
         elif self._init_type == 'tier3':
             # ------------------------------------------------------------------
@@ -973,18 +998,22 @@ class ClothEnv(gym.Env):
             else:
                 raise NotImplementedError()
             action0 = self._convert_action_to_clip_space(action0)
-            self.step(action0, initialize=True)
+            cloth_1d = self.step(action0, initialize=True)
+            cloth_3d_obs.extend(cloth_1d)
 
             # Settle, and then re-assign to `self.iters_up`.
             logger.debug("Let's continue simulating to finish the reset().")
             for i in range(800):
                 self.cloth.update()
+                cloth_3d_obs.append(self.obs_1d)
             self.iters_up = old_iters_up
         else:
             raise ValueError(self._init_type)
 
         logger.debug("STARTING COVERAGE: {:.2f}".format(self._compute_coverage()))
         logger.debug("STARTING VARIANCE: {:.2f}".format(self._compute_variance()))
+
+        return cloth_3d_obs
 
     def get_random_action(self, atype='over_xy_plane'):
         """Retrieves random action.
