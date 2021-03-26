@@ -15,8 +15,10 @@ import logging
 import pickle
 import datetime
 import cv2
+import hickle as hkl
 from gym_cloth.envs import ClothEnv
 from collections import defaultdict
+from matplotlib import pyplot as plt
 np.set_printoptions(edgeitems=10, linewidth=180, suppress=True)
 
 #Adi: Now adding the 'oracle_reveal' demonstrator policy which in reveals occluded corners.
@@ -658,6 +660,47 @@ class RandomPolicy(Policy):
         return self.env.get_random_action(atype=self.type)
 
 
+def plot_2d(obs, num_steps, tier):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    iteration = len(obs)-1
+    cloth_array = obs[iteration]
+    x_cloth = cloth_array[:, 0]
+    y_cloth = cloth_array[:, 1]
+    z_cloth = cloth_array[:, 2]
+    ax.scatter(x_cloth, y_cloth, z_cloth, marker='o')
+
+    lattice_size = x_cloth.shape[0]
+    nr_points = int(np.sqrt(lattice_size))
+    n_points1 = nr_points - 1
+    color = "blue"
+    # Create the connections between the rows (width)
+    for i in range(0, lattice_size - 1, nr_points):
+        for j in range(i, i + n_points1):
+            ax.plot3D([x_cloth[j], x_cloth[j + 1]], [y_cloth[j], y_cloth[j + 1]],
+                      [z_cloth[j], z_cloth[j + 1]], c=color)
+    # Create the connections between the columns (height)
+    for i in range(0, nr_points):
+        for j in range(i, lattice_size - nr_points, nr_points):
+            ax.plot3D([x_cloth[j], x_cloth[j + nr_points]],
+                      [y_cloth[j], y_cloth[j + nr_points]],
+                      [z_cloth[j], z_cloth[j + nr_points]], c=color)
+
+    ax.set_ylabel("Y")
+    ax.set_xlabel("X")
+    ax.set_zlabel("Z")
+    ax.set_xlim(-0.1, 1.05)
+    ax.set_ylim(-0.1, 1.05)
+    ax.set_zlim(-0.001, 1.0)
+    ax.view_init(elev=42., azim=-106)
+    plt.legend()
+    # plt.show()
+
+    plt.savefig("Graph_tier_" + str(tier) + "_t" + str(num_steps))
+
+    plt.close(fig)
+
+
 def run(args, policy):
     """Run an analytic policy, using similar setups as baselines-fork.
 
@@ -704,8 +747,15 @@ def run(args, policy):
     variance_inv = []
     nb_steps = []
 
+    cloth_tier = args.tier
+
+    cloth_obs = []
+
     for ep in range(args.max_episodes):
-        obs = env.reset()
+        obs, obs_1d = env.reset()
+        cloth_obs.extend(obs_1d)
+        cloth_npy = np.array(cloth_obs)
+        plot_2d(obs_1d, 0, cloth_tier)
         # Go through one episode and put information in `stats_ep`.
         # Don't forget the first obs, since we need t _and_ t+1.
         stats_ep = defaultdict(list)
@@ -721,7 +771,10 @@ def run(args, policy):
             stats_ep['act'].append(action)
             stats_ep['done'].append(done)
             stats_ep['info'].append(info)
+            obs_1d = info['obs_1d']
             num_steps += 1
+            cloth_obs.extend(obs_1d)
+            plot_2d(obs_1d, num_steps, cloth_tier)
         num_episodes += 1
         coverage.append(info['actual_coverage'])
         variance_inv.append(info['variance_inv'])
@@ -735,6 +788,14 @@ def run(args, policy):
                 np.mean(variance_inv), np.std(variance_inv)))
         print('  {:.2f} +/- {:.1f} (steps per episode)'.format(
                 np.mean(nb_steps), np.std(nb_steps)))
+
+        # If we have finished one episode save the data and end
+        filename = "cloth_data_tier_" + str(cloth_tier) + ".hkl"
+        cloth_npy = np.array(cloth_obs)
+        hkl.dump(cloth_npy, filename, mode='w')
+        env.render_proc.terminate()
+        env.cloth.stop_render()
+        return 0  # End
 
         # Just dump here to keep saving and overwriting.
         with open(result_path, 'wb') as fh:
