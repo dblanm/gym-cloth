@@ -48,13 +48,13 @@ _REWARD_THRESHOLDS = {
     'height-delta': 0.85,
     'variance': 2,
     'variance-delta': 2,
-    'folding-number': 0
+    'folding': 0.01
 }
 
 _EPS = 1e-5
 
 
-class ClothEnv(gym.Env):
+class DiagonalClothEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
     def __init__(self, cfg_file, subrank=None, start_state_path=None):
@@ -91,25 +91,15 @@ class ClothEnv(gym.Env):
         self.cfg              = cfg
         self.cfg_file         = cfg_file
         self.max_actions      = cfg['env']['max_actions']
-        self.max_z_threshold  = cfg['env']['max_z_threshold']
-        self.iters_up         = cfg['env']['iters_up']
-        self.iters_up_rest    = cfg['env']['iters_up_rest']
-        self.iters_pull_max   = cfg['env']['iters_pull_max']
-        self.iters_grip_rest  = cfg['env']['iters_grip_rest']
-        self.iters_rest       = cfg['env']['iters_rest']
-        self.updates_per_move = cfg['env']['updates_per_move']
-        self.reduce_factor    = cfg['env']['reduce_factor']
         self.grip_radius      = cfg['env']['grip_radius']
         self.render_gl        = cfg['init']['render_opengl']
         self._init_type       = cfg['init']['type']
         self._clip_act_space  = cfg['env']['clip_act_space']
         self._delta_actions   = cfg['env']['delta_actions']
         self._obs_type        = cfg['env']['obs_type']
-        self._force_grab      = cfg['env']['force_grab']
         self._oracle_reveal   = cfg['env']['oracle_reveal']
         self._use_depth       = cfg['env']['use_depth']
         self._use_rgbd        = cfg['env']['use_rgbd']
-        self._radius_inc      = 0.02
         self.bounds = bounds  = (1, 1, 1)
         self.render_proc      = None
         self.render_port      = 5556
@@ -129,16 +119,6 @@ class ClothEnv(gym.Env):
         # particularly if we do DeepRL with demos, because demos need rewards
         # consistent with those seen during training.
         self.reward_type = cfg['env']['reward_type']
-        assert 'coverage' in self.reward_type
-        self._prev_reward = 0
-        self._neg_living_rew = 0.0     # -0.05
-        self._nogrip_penalty = -0.01   # I really think we should have this
-        self._tear_penalty = 0.0       # -10 (OpenAI Dactyl -10 for failures)
-        self._oob_penalty = 0.0        # -10 (OpenAI Dactyl -10 for failures)
-        self._cover_success = 5.       # (OpenAI Dactyl +5 for success)
-        self._act_bound_factor = 1.0
-        self._act_pen_limit = 3.0
-        self._current_coverage = 0.0
 
         # Create observation ('1d', '3d') and action spaces. Possibly make the
         # obs_type and other stuff user-specified parameters.
@@ -160,27 +140,19 @@ class ClothEnv(gym.Env):
         else:
             raise ValueError(self._obs_type)
 
-        # Ideally want the gripper to grip points in (0,1) for x and y. Perhaps
-        # consider slack that we use for out of bounds detection? Subtle issue.
-        b0, b1 = self.bounds[0], self.bounds[1]
         if self._clip_act_space:
             # Applies regardless of 'delta actions' vs non deltas.  Note misleading
             # 'clip' name, because (0,1) x/y-coords are *expanded* to (-1,1).
             self.action_space = spaces.Box(
-                low= np.array([-1., -1., -1., -1.]),
-                high=np.array([ 1.,  1.,  1.,  1.])
+                low= np.array([-1., -1., -1.]),
+                high=np.array([ 1.,  1.,  1.])
             )
         else:
-            if self._delta_actions:
-                self.action_space = spaces.Box(
-                    low= np.array([0., 0., -1., -1.]),
-                    high=np.array([1., 1.,  1.,  1.])
-                )
-            else:
-                self.action_space = spaces.Box(
-                    low= np.array([  -self._slack,   -self._slack, 0.0, -np.pi]),
-                    high=np.array([b0+self._slack, b1+self._slack, 1.0,  np.pi])
-                )
+            self.action_space = spaces.Box(
+                low= np.array([-1., -1., -1., -1.]),
+                high=np.array([1., 1.,  1.,  1.])
+            )
+
 
         # Bells and whistles
         self._setup_logger()
@@ -213,10 +185,48 @@ class ClothEnv(gym.Env):
 
     @property
     def obs_1d(self):
+        """ 3D Observation X,Y,Z of the points"""
         lst = []
         for pt in self.cloth.pts:
             lst.append(np.array([pt.x, pt.y, pt.z]))
         return np.array(lst)
+
+    @property
+    def grasped_pts(self):
+        """ Index of grasped points the the self.obs_1d array"""
+        cloth_points = self.obs_1d
+        idx_grasped_list = []
+        grasp_points = []
+        for pt in self.gripper.grabbed_pts:
+            grasp_points.append(np.array([pt.x, pt.y, pt.z]))
+            pt_list = np.array([pt.x, pt.y, pt.z]).tolist()
+            if np.any((cloth_points[:] == pt_list).all(axis=1)):
+                idxs = np.where((cloth_points[:] == pt_list).all(axis=1))
+                for id in idxs:
+                    idx_grasped_list.append(id)
+        # Array of x,y,z grasping points
+        grasp_array = np.array(grasp_points)
+        # Index of grasping points
+        idx_grasped = np.array(idx_grasped_list).flatten()
+        # Double check grasp array and cloth points grasped are the same
+        if len(grasp_points) > 0:
+            cloth_points_grasped = cloth_points[idx_grasped]
+            np.testing.assert_allclose(grasp_array, cloth_points_grasped)
+        return idx_grasped
+
+    def _get_state_action(self, a_x, a_y, a_z):
+        # Identify which are the grasped points
+        idx_grasped = self.grasped_pts
+        # Get the observation state
+        obs_state = self.obs_1d
+        # Create the actions array
+        act_array = np.zeros(obs_state.shape, dtype=obs_state.dtype)
+        gripped_array = np.zeros((obs_state.shape[0], 1), dtype=obs_state.dtype)
+        if idx_grasped.size != 0:
+            act_array[idx_grasped] = np.array([a_x, a_y, a_z])
+        obs_state_action = np.hstack((obs_state, act_array, gripped_array))
+
+        return obs_state_action
 
     def get_blender_rep(self, use_depth):
         """Ryan: put get_blender_rep in its own method so we can easily get RGBD images."""
@@ -278,7 +288,7 @@ class ClothEnv(gym.Env):
                 ]
             )
         else:
-            subprocess.call([
+            subprocess.run([
                 'blender', '--background', '--python', bfile, '--', tm_path,
                 str(self._hd), str(self._wd), str(init_side), self._init_type,
                 frame_path, self._oracle_reveal, use_depth, floor_path,
@@ -288,8 +298,19 @@ class ClothEnv(gym.Env):
                 ",".join([str(i) for i in self.dom_rand_params['camera_pos']]),
                 ",".join([str(i) for i in self.dom_rand_params['camera_deg']]),
                 str(self.dom_rand_params['specular_max'])
-                ]
-            )
+            ], stdout=subprocess.DEVNULL)
+            # subprocess.call([
+            #     'blender', '--background', '--python', bfile, '--', tm_path,
+            #     str(self._hd), str(self._wd), str(init_side), self._init_type,
+            #     frame_path, self._oracle_reveal, use_depth, floor_path,
+            #     self.__add_dom_rand,
+            #     ",".join([str(i) for i in self.dom_rand_params['c']]),
+            #     ",".join([str(i) for i in self.dom_rand_params['n1']]),
+            #     ",".join([str(i) for i in self.dom_rand_params['camera_pos']]),
+            #     ",".join([str(i) for i in self.dom_rand_params['camera_deg']]),
+            #     str(self.dom_rand_params['specular_max'])
+            #     ]
+            # )
         time.sleep(1)  # Wait a bit just in case
 
         # Step 3: load image from directory saved by blender.
@@ -358,174 +379,66 @@ class ClothEnv(gym.Env):
         with open(cloth_file, 'wb') as fh:
             pickle.dump({"pts": self.cloth.pts, "springs": self.cloth.springs}, fh)
 
-    def _pull(self, i, iters_pull, x_diag_r, y_diag_r):
-        """Actually perform pulling, assuming length/angle actions.
-
-        There are two cases when the pull should be stable: after pulling up,
-        and after pulling in the plane with a fixed z height.
-        """
-        if i < self.iters_up:
-            self.gripper.adjust(x=0.0, y=0.0, z=0.0025)
-        elif i < self.iters_up + self.iters_up_rest:
-            pass
-        elif i < self.iters_up + self.iters_up_rest + iters_pull:
-            self.gripper.adjust(x=x_diag_r, y=y_diag_r, z=0.0)
-        elif i < self.iters_up + self.iters_up_rest + iters_pull + self.iters_grip_rest:
-            pass
-        else:
-            self.gripper.release()
-
-    def step(self, action, initialize=False):
+    def step(self, action, initialize=False, cloth_updates=5):
         """Execute one action.
+        Currently, actions are (pull fraction length).
+        The top right corner is grasped and pulled using pull fraction length
 
-        Currently, actions are parameterized as (grasp_point, pull fraction
-        length, pull direction).  It will grasp at some target point, and then
-        pull in the chosen direction for some number of cloth updates. We have
-        rest periods to help with stability.
-
-        If we clipped the action space into [-1,1], (meaning the policy or
-        human would output values between [-1,1] for each component) then for
-        actions with true ranges of [0,1], divide the original [-1,1] actions
-        by two and add 0.5. For angle, multiply by pi.
-
-        Parameters
-        ----------
-        action: tuple
-            Action to be applied this step.
-        initialize: bool
-            Normally false. If true, that means we're in the initialization step
-            from an `env.reset()` call, and so we probably don't want to count
-            these 'actions' as part of various statistics we compute.
-
-        Returns
-        -------
-        Usual (state, reward, done, info) from env steps. Our info contains the
-        number of steps called, both for actions and `cloth.update()` calls.
+        Originally, actions are parameterized as (grasp_point, pull fraction
+        length, pull direction).
         """
         info = {}
         logger = self.logger
         exit_early = False
-        astr = self._act2str(action)
+        # astr = self._act2str(action)
 
         # Truncate actions according to our bounds, then grip.
         low  = self.action_space.low
         high = self.action_space.high
-        if self._delta_actions:
-            x_coord, y_coord, delta_x, delta_y = action
-            x_coord = max(min(x_coord, high[0]), low[0])
-            y_coord = max(min(y_coord, high[1]), low[1])
-            delta_x = max(min(delta_x, high[2]), low[2])
-            delta_y = max(min(delta_y, high[3]), low[3])
-        else:
-            x_coord, y_coord, length, radians = action
-            x_coord = max(min(x_coord, high[0]), low[0])
-            y_coord = max(min(y_coord, high[1]), low[1])
-            length  = max(min(length,  high[2]), low[2])
-            r_trunc = max(min(radians, high[3]), low[3])
 
-        if self._clip_act_space:
-            # If we're here, then all four of these are in the range [-1,1].
-            # Due to noise it might originally be out of range, but we truncated.
-            x_coord = (x_coord / 2.0) + 0.5
-            y_coord = (y_coord / 2.0) + 0.5
-            if self._delta_actions:
-                pass
-            else:
-                length = (length / 2.0) + 0.5
-                r_trunc = r_trunc * np.pi
+        delta_x, delta_y, delta_z = action
+        delta_x = max(min(delta_x, high[0]), low[0])
+        delta_y = max(min(delta_y, high[1]), low[1])
+        delta_z = max(min(delta_z, high[2]), low[2])
+
         # After this, we assume ranges {[0,1], [0,1],  [0,1], [-pi,pi]}.
         # Or if delta actions,         {[0,1], [0,1], [-1,1],   [-1,1]}.
         # Actually for non deltas, we have slack applied ...
+        corner = 'top_right'
+        self.gripper.grab_corner(corner)
 
-        self.gripper.grab_top(x_coord, y_coord)
 
-        # Hacky solution to make us forcibly grip.
-        if self._force_grab == True:
-            logger.debug('Inside force_grab, make sure we are EVALUATING!')
-            radius_old = self.gripper.grip_radius
-            while len(self.gripper.grabbed_pts) == 0:
-                self.gripper.grip_radius += self._radius_inc
-                logger.debug('radius incremented to: {}'.format(self.gripper.grip_radius))
-                self.gripper.grab_top(x_coord, y_coord)
-            if self.gripper.grip_radius != radius_old:
-                self.gripper.grip_radius = radius_old
-                logger.debug('radius reset to: {}'.format(self.gripper.grip_radius))
-            logger.debug('done, grabbed points: {}'.format(self.gripper.grabbed_pts))
-
-        # Determine direction on UNIT CIRCLE, then downscale by reduce_factor to
-        # ensure we only move a limited amount each time step, might help physics?
-        if self._delta_actions:
-            total_length = np.sqrt( (delta_x)**2 + (delta_y)**2 )
-            x_dir = delta_x / (total_length + _EPS)
-            y_dir = delta_y / (total_length + _EPS)
-        else:
-            x_dir = np.cos(r_trunc)
-            y_dir = np.sin(r_trunc)
-        x_dir_r = x_dir * self.reduce_factor
-        y_dir_r = y_dir * self.reduce_factor
-
-        # Number of iterations for each stage of the action. Actually, the
-        # iteration for the pull can be computed here ahead of time.
-        if self._delta_actions:
-            ii = 0
-            current_l = 0
-            while True:
-                current_l += np.sqrt( (x_dir_r)**2 + (y_dir_r)**2 )
-                if current_l >= total_length:
-                    break
-                ii += 1
-            iters_pull = ii
-        else:
-            iters_pull = int(self.iters_pull_max * length)
-
-        pull_up    = self.iters_up + self.iters_up_rest
-        rest_start = self.iters_up + self.iters_up_rest + iters_pull
-        drop_start = self.iters_up + self.iters_up_rest + iters_pull + self.iters_grip_rest
-        iterations = self.iters_up + self.iters_up_rest + iters_pull + self.iters_grip_rest + self.iters_rest
-
-        if initialize:
-            logger.info("         ======== [during obs.reset()] EXECUTING ACTION: {} ========".format(astr))
-        else:
-            logger.info("         ======== EXECUTING ACTION: {} ========".format(astr))
-        logger.debug("Gripped at ({:.2f}, {:.2f})".format(x_coord, y_coord))
+        logger.info("         ======== EXECUTING ACTION: {} ========")
+        logger.debug("Gripped at ({})".format(corner))
         logger.debug("Grabbed points: {}".format(self.gripper.grabbed_pts))
         logger.debug("Total grabbed: {}".format(len(self.gripper.grabbed_pts)))
-        logger.debug("Action maps to {:.3f}, {:.3f}".format(x_dir, y_dir))
-        logger.debug("Actual magnitudes: {:.4f}, {:.4f}".format(x_dir_r, y_dir_r))
-        logger.debug("itrs up / wait / pull / wait / drop+rest: {}, {}, {}, {}, {}".format(
-            self.iters_up, self.iters_up_rest, iters_pull, self.iters_grip_rest, self.iters_rest))
-
-        # Add special (but potentially common) case, if our gripper grips nothing.
-        if len(self.gripper.grabbed_pts) == 0:
-            logger.info("No points gripped! Exiting action ...")
-            exit_early = True
-            iterations = 0
+        logger.debug("Action magnitudes: {:.4f}, {:.4f}, {:.4f}".format(delta_x, delta_y, delta_z))
 
         i = 0
+
         cloth_3d_obs = []
-        # Iterate T times to perform pulling in the diretion of X and Y
-        while i < iterations:
-            self._pull(i, iters_pull, x_dir_r, y_dir_r)
+        initial_points = self._get_state_action(0., 0., 0.)
+        # Perform the actual pulling
+        self.gripper.adjust(x=delta_x, y=delta_y, z=delta_z)
+        # Get the index of graspped points
+        idx_pulled = self.grasped_pts
+        if idx_pulled.size != 0:  # Add the actions to the cloth state observation
+            initial_points[idx_pulled, 3:6] = np.array([delta_x, delta_y, delta_z])
+            initial_points[idx_pulled, -1] = 1  # Add index for graspped point
+        cloth_3d_obs.append(initial_points)
+        # Update the cloth after pulling and get the state of the cloth
+        for i in range(cloth_updates):
             self.cloth.update()
-            cloth_3d_obs.append(self.obs_1d)
-            if not initialize:
-                self.num_sim_steps += 1
+            updated_points = self._get_state_action(0., 0., 0.)
+            updated_points[idx_pulled, -1] = 1
+            if cloth_updates != 10:
+                cloth_3d_obs.append(updated_points)
 
-            # Debugging -- move to separate method?
-            if i == self.iters_up:
-                logger.debug("i {}, now pulling".format(self.iters_up))
-            elif i == drop_start:
-                logger.debug("i {}, now dropping".format(drop_start))
-            if self.debug_viz and i % 3 == 0:
-                self._debug_viz_plots()
-
-            # If we get any tears (pull in a bad direction, etc.), exit.
-            if self.cloth.have_tear:
-                logger.debug("TEAR, exiting...")
-                self.have_tear = True
-                break
-            i += 1
-
+        if cloth_updates == 10:
+            updated_points = self._get_state_action(0., 0., 0.)
+            updated_points[idx_pulled, -1] = 1
+            cloth_3d_obs.append(updated_points)
+        # Test if the time-sequence has been well captured
         if initialize:
             return cloth_3d_obs
         self.num_steps += 1
@@ -536,195 +449,45 @@ class ClothEnv(gym.Env):
         info = {
             'num_steps': self.num_steps,
             'num_sim_steps': self.num_sim_steps,
-            'actual_coverage': self._current_coverage,
-            'start_coverage': self._start_coverage,
-            'variance_inv': self._compute_variance(),
-            'start_variance_inv': self._start_variance_inv,
-            'have_tear': self.have_tear,
             'out_of_bounds': self._out_of_bounds(),
             'obs_1d': cloth_3d_obs
         }
         return self.state, rew, term, info
 
     def _reward(self, action, exit_early):
-        """Reward function.
+        return self._fold_reward()
 
-        First we apply supporting and auxiliary rewards. Then we define actual
-        coverage approximations. For now we are keeping the reward as deltas
-        and then a large bonus for task completion.
+    def _fold_reward(self):
+        "Check if the fold has succeeded"
+        cloth_points = self.obs_1d
+        # Get the top corners and bottom corners of the cloth
+        # 0, 24, 600, 624
+        top_left = cloth_points[0]
+        top_right = cloth_points[24]
+        bot_left = cloth_points[600]
+        bot_right = cloth_points[624]
 
-        If we want to ignore any of the extra 'auxiliary' penalties/rewards,
-        modify vaules in `self.__init__` instead of commenting out here.
+        # Compute the distance between each of the points
+        dist_left = np.linalg.norm(top_left - bot_left)
+        dist_right = np.linalg.norm(top_right - bot_right)
+        self.logger.info("Distance left ={:.3f}".format(dist_left))
+        self.logger.info("Distance right ={:.3f}".format(dist_right))
 
-        Parameters
-        ----------
-        action: The action taken from self.step()
-        exit_early: True if the agent never gripped anything. Then we'll
-            probably want to apply a penalty.
-        """
-        log = self.logger
+        # Compute the reward / sum of distance
+        total_dist = dist_left + dist_right
 
-        # Keep adjusting this to get cumulative reward.
-        rew = 0
-
-        # Apply one of tear OR oob penalities. Then one for bad / wasted actions.
-        if self.have_tear:
-            rew += self._tear_penalty
-            log.debug("Apply tear penalty, reward {:.2f}".format(rew))
-        elif self._out_of_bounds():
-            rew += self._oob_penalty
-            log.debug("Apply out of bounds penalty, reward {:.2f}".format(rew))
-        if exit_early:
-            rew += self._nogrip_penalty
-            log.debug("Apply no grip penalty, reward {:.2f}".format(rew))
-
-        # Apply penalty if action outside the bounds.
-        def penalize_action(aval, low, high):
-            if low <= aval <= high:
-                return 0.0
-            if aval < low:
-                diff = low - aval
-            else:
-                diff = aval - high
-            pen = - min(diff**2, self._act_pen_limit) * self._act_bound_factor
-            assert pen < 0
-            return pen
-
-        if not self._clip_act_space:
-            x_coord, y_coord, length, radians = action
-            low = self.action_space.low
-            high = self.action_space.high
-            pen0 = penalize_action(x_coord, low[0], high[0])
-            pen1 = penalize_action(y_coord, low[1], high[1])
-            pen2 = penalize_action(length,  low[2], high[2])
-            pen3 = penalize_action(radians, low[3], high[3])
-            rew += pen0
-            rew += pen1
-            rew += pen2
-            rew += pen3
-            log.debug("After action pen. {:.2f} {:.2f} {:.2f} {:.2f}, rew {:.2f}".
-                    format(pen0, pen1, pen2, pen3, rew))
-
-        # Define several coverage formulas. Subtle point about deltas: the
-        # input is reward but not the 'auxiliary' bonuses, etc.
-
-        def _save_bad_hull(points, eps=1e-4):
-            log.warn("Bad ConvexHull hull! Note, here len(points): {}".format(len(points)))
-            pth_head = 'bad_cloth_hulls'
-            if not os.path.exists(pth_head):
-                os.makedirs(pth_head, exist_ok=True)
-            num = len([x for x in os.listdir(pth_head) if 'cloth_' in x])
-            if self._logger_idx is not None:
-                cloth_file = join(pth_head,
-                        'cloth_{}_subrank_{}.pkl'.format(num+1, self._logger_idx))
-            else:
-                cloth_file = join(pth_head, 'cloth_{}.pkl'.format(num+1))
-            self.save_state(cloth_file)
-
-        def compute_height():
-            threshold = self.cfg['cloth']['thickness'] / 2.0
-            allpts = self.cloth.allpts_arr  # fyi, includes pinned
-            z_vals = allpts[:,2]
-            num_below_thresh = np.sum(z_vals < threshold)
-            fraction = num_below_thresh / float(len(z_vals))
-            return fraction
-
-        def compute_variance():
-            allpts = self.cloth.allpts_arr
-            z_vals = allpts[:,2]
-            variance = np.var(z_vals)
-            if variance < 0.000001: # handle asymptotic behavior
-                return 1000
-            else:
-                return 0.001 / variance
-
-        def compute_coverage():
-            points = np.array([[min(max(p.x,0),1), min(max(p.y,0),1)] for p in self.cloth.pts])
-            try:
-                # In 2D, this actually returns *AREA* (hull.area returns perimeter)
-                hull = ConvexHull(points)
-                coverage = hull.volume
-            except scipy.spatial.qhull.QhullError as e:
-                logging.exception(e)
-                _save_bad_hull(points)
-                coverage = 0
-            return coverage
-
-        def compute_delta(reward):
-            diff = reward - self._prev_reward
-            self._prev_reward = reward
-            return diff
-
-        # Huge reward if we've succeeded in coverage.  This is where we assign
-        # to _current_coverage, so be careful if this is what we want, e.g., if
-        # we've torn the cloth or are out of bounds, it's not updated.
-        self._current_coverage = compute_coverage()
-        if self._current_coverage > _REWARD_THRESHOLDS['coverage']:
-            rew += self._cover_success
-            log.debug("Success in coverage!! reward {:.2f}".format(rew))
-
-        rew += self._neg_living_rew
-        log.debug("After small living penalty, reward {:.2f}".format(rew))
-
-        # August 2, 2019: only using coverage and coverage-delta.
-        if self.reward_type == 'coverage':
-            # Actual coverage of the cloth on the XY-plane.
-            rew += compute_coverage()
-        elif self.reward_type == 'coverage-delta':
-            # * difference * in coverage on the XY-plane.
-            rew += compute_delta(compute_coverage())
-        elif self.reward_type == 'height':
-            # Proportion of points that are below thickness-dependent threshold.
-            rew += compute_height()
-        elif self.reward_type == 'height-delta':
-            # * difference * in the proportion of points below threshold.
-            rew += compute_delta(compute_height())
-        elif self.reward_type == 'variance':
-            # 1/variance in Z-coordinate (to punish high variance)
-            rew += compute_variance()
-        elif self.reward_type == 'variance-delta':
-            # * difference * in 1/variance.
-            rew += compute_delta(compute_variance())
-        elif self.reward_type == 'folding-number':
-            # Probably never doing this anytime soon. :-)
-            raise NotImplementedError()
-        else:
-            raise ValueError(self.reward_type)
-
-        log.debug("COVERAGE {:.2f}, reward at end {:.2f}".format(self._current_coverage, rew))
-        return rew
+        return total_dist
 
     def _terminal(self):
-        """Detect if we're done with an episode, for any reason.
+        "Check if the fold has succeeded"
+        fold_dist = self._fold_reward()
 
-        First we detect for (a) exceeding max steps, (b) tearing, (c) out of
-        bounds. Then we check if we have sufficiently covered the plane.
-        """
+        self.logger.info("Total distance ={:.3f}, threshold is ={:.3f}".format(fold_dist,
+                                                                           _REWARD_THRESHOLDS[self.reward_type]))
+
         done = False
-
-        if self.num_steps >= self.max_actions:
-            self.logger.info("num_steps {} >= max_actions {}, hence done".format(
-                    self.num_steps, self.max_actions))
+        if fold_dist < _REWARD_THRESHOLDS[self.reward_type]:  # Reward type is the foldding threshold
             done = True
-        elif self.have_tear:
-            self.logger.info("A \'tear\' exists, hence done")
-            done = True
-        elif self._out_of_bounds():
-            self.logger.info("Went out of bounds, hence done")
-            done = True
-
-        # Assumes _current_coverage set in _reward() call before _terminal().
-        assert 'coverage' in self.reward_type
-        rew_thresh = _REWARD_THRESHOLDS[self.reward_type]
-        if self._current_coverage > rew_thresh:
-            self.logger.info("Cloth is sufficiently smooth, {:.3f} exceeds "
-                "threshold {:.3f} hence done".format(self._prev_reward, rew_thresh))
-            done = True
-
-        if done and self.render_gl:
-            #self.render_proc.terminate()
-            self.cloth.stop_render()
-            #self.render_proc = None
         return done
 
     def reset(self):
@@ -787,13 +550,6 @@ class ClothEnv(gym.Env):
         reset_time = (time.time() - reset_start) / 60.0
         logger.debug("Done with initial state, {:.2f} minutes".format(reset_time))
 
-        # Adding to ensure prev_reward is set correctly after init, if we are
-        # using deltas. Assign here because it's after we load/init the cloth.
-        assert 'coverage' in self.reward_type
-        self._prev_reward = self._compute_coverage()
-        self._start_coverage = self._prev_reward
-        self._start_variance_inv = self._compute_variance()
-
         # We shouldn't need to wrap around np.array(...) as self.state does that.
         # Ryan: compute dom rand params once per episode
         self.dom_rand_params['gval_depth'] = self.np_random.uniform(low=40, high=50) # really pixels ...
@@ -810,26 +566,6 @@ class ClothEnv(gym.Env):
 
     def _reset_actions(self):
         """Helper for reset in case reset applies action.
-
-        Mainly to help clean up the code. Note that cfg['init']['type'] is
-        heavily intertwined with the cloth.pyx initialization, so always
-        cross-reference with code there. If we decide on fixing how states are
-        initialized, do it here (and with cloth.pyx if needed).
-
-        Remember that actions applied to self.step need to be consistent with
-        whether we're using delta or non-delta actions. Within self.step, it
-        gets converted to the non-delta if needed, but if our _settings_ say we
-        use delta, we need delta actions. Similarly for clipping actions, our
-        step will automatically 'unclip' these.
-
-        Use self.np_random for anything random-related, NOT np.random.
-
-        See comments inside the code for specifics regarding the tiers.
-
-        To get the highest point, use:
-            highest_point = max(self.cloth.pts, key=lambda pt: pt.z)
-        Or a list in descending order:
-            high_points = sorted(self.cloth.pts, key=lambda pt: pt.z, reverse=True)
         """
         logger = self.logger
         cfg = self.cfg
@@ -837,176 +573,12 @@ class ClothEnv(gym.Env):
 
         # Create a list to store all the cloth transitions
         cloth_3d_obs = []
-        # Get the initial state of the cloth
-        cloth_3d_obs.append(self.obs_1d)
+        # Get the initial state-action of the cloth
+        cloth_3d_obs.append(self._get_state_action(0.0, 0.0, 0.0))
 
-        def _randval_minabs(low, high, minabs=None):
-            # Helper to handle ranges with minabs requirements.
-            val = self.np_random.uniform(low=low, high=high)
-            if minabs is not None:
-                assert minabs > 0, minabs
-                assert low < -minabs or high > minabs
-                while np.abs(val) < minabs:
-                    val = self.np_random.uniform(low=low, high=high)
-            return val
-
-        def _prevent_oob(val, dval, lower=0.0, upper=1.0):
-            # Helper to somewhat mitigate prevent out of bounds
-            if val + dval < lower:
-                dval = lower - val
-            elif val + dval > upper:
-                dval = upper - val
-            return dval
-
-        if self._init_type == 'tier1':
-            # ------------------------------------------------------------------
-            # Should reveal all corners, or be reasonably easy. Ideally, don't
-            # pull the cloth out of bounds by too much. I do this with two
-            # (optionally three, if the first two didn't do much) pulls
-            # starting from a flat cloth, where the two pulls are relatively
-            # short and attempt not to go out of bounds too much.
-            # ------------------------------------------------------------------
-            lim = 0.20
-
-            # First pull.
-            p0 = self.cloth.pts[ self.np_random.randint(len(self.cloth.pts)) ]
-            if self._delta_actions:
-                dx0 = _randval_minabs(low=-lim, high=lim, minabs=0.08)
-                dy0 = _randval_minabs(low=-lim, high=lim, minabs=0.08)
-                dx0 = _prevent_oob(p0.x, dx0)
-                dy0 = _prevent_oob(p0.y, dy0)
-                action0 = (p0.x, p0.y, dx0, dy0)
-            else:
-                raise NotImplementedError()
-            action0 = self._convert_action_to_clip_space(action0)
-            cloth_1d = self.step(action0, initialize=True)
-            cloth_3d_obs.extend(cloth_1d)
-
-            # Second pull.
-            p1 = self.cloth.pts[ self.np_random.randint(len(self.cloth.pts)) ]
-            if self._delta_actions:
-                dx1 = _randval_minabs(low=-lim, high=lim, minabs=0.08)
-                dy1 = _randval_minabs(low=-lim, high=lim, minabs=0.08)
-                dx1 = _prevent_oob(p1.x, dx1)
-                dy1 = _prevent_oob(p1.y, dy1)
-                action1 = (p1.x, p1.y, dx1, dy1)
-            else:
-                raise NotImplementedError()
-            action1 = self._convert_action_to_clip_space(action1)
-            cloth_1d = self.step(action1, initialize=True)
-            cloth_3d_obs.extend(cloth_1d)
-
-            # Third pull if the cloth looks too flat.
-            if self._compute_coverage() >= 0.90:
-                p2 = self.cloth.pts[ self.np_random.randint(len(self.cloth.pts)) ]
-                if self._delta_actions:
-                    dx2 = _randval_minabs(low=-lim, high=lim, minabs=0.08)
-                    dy2 = _randval_minabs(low=-lim, high=lim, minabs=0.08)
-                    dx2 = _prevent_oob(p2.x, dx2)
-                    dy2 = _prevent_oob(p2.y, dy2)
-                    action2 = (p2.x, p2.y, dx2, dy2)
-                else:
-                    raise NotImplementedError()
-                action2 = self._convert_action_to_clip_space(action2)
-                cloth_1d = self.step(action2, initialize=True)
-                cloth_3d_obs.extend(cloth_1d)
-
-        elif self._init_type == 'tier2':
-            # ------------------------------------------------------------------
-            # Should have some difficulty (e.g., one corner hidden). The
-            # cloth.pyx randomly picks which side (init_side) to let the cloth
-            # drop from. The cloth settles, and then we pick one of the two top
-            # most corners, and pull it towards the center of the frame. Then
-            # we make a second pull that tries to cover it. This setup could
-            # even double as our 'bed-making task' if we wanted one.
-            # ------------------------------------------------------------------
-            for i in range(1500):
-                self.cloth.update()
-                cloth_3d_obs.append(self.obs_1d)
-            logger.debug("Cloth settled, now apply actions.")
-
-            # Pick one of the two topmost corners ('top' -1, 'bottom' -25).
-            idx = -25 if self.np_random.rand() < 0.5 else -1
-
-            # Apply first pull, roughly towards the center (i.e., don't have
-            # high dx0, make dy0 positive if bottom, reverse if not, etc).
-            p0 = self.cloth.pts[ idx ]
-            if self._delta_actions:
-                dx0 = self.np_random.uniform(0.30, 0.50) * init_side
-                if idx == -25:
-                    dy0 = self.np_random.uniform(0.30, 0.60)
-                else:
-                    dy0 = self.np_random.uniform(-0.60, -0.30)
-                action0 = (p0.x, p0.y, dx0, dy0)
-            else:
-                raise NotImplementedError()
-            action0 = self._convert_action_to_clip_space(action0)
-            cloth_1d = self.step(action0, initialize=True)
-            cloth_3d_obs.extend(cloth_1d)
-
-            # Now attempt to cover that corner. Here we can have a slightly
-            # longer range of dx0, also make dy0 now reverse of earlier, but
-            # dx0 has same magnitude as we pull in same general x direction.
-            if idx == -25:
-                p1 = self.cloth.pts[-19]
-                if self._delta_actions:
-                    dx1 = self.np_random.uniform(0.30, 0.60) * init_side
-                    dy1 = self.np_random.uniform(-0.30, -0.60)
-                    action1 = (p1.x, p1.y, dx1, dy1)
-                else:
-                    raise NotImplementedError()
-                action1 = self._convert_action_to_clip_space(action1)
-            elif idx == -1:
-                p1 = self.cloth.pts[-7]
-                if self._delta_actions:
-                    dx1 = self.np_random.uniform(0.30, 0.60) * init_side
-                    dy1 = self.np_random.uniform(0.30, 0.60)
-                    action1 = (p1.x, p1.y, dx1, dy1)
-                else:
-                    raise NotImplementedError()
-                action1 = self._convert_action_to_clip_space(action1)
-            cloth_1d = self.step(action1, initialize=True)
-            cloth_3d_obs.extend(cloth_1d)
-
-            logger.debug("Let's continue simulating to finish the reset().")
-            for i in range(500):
-                self.cloth.update()
-                cloth_3d_obs.append(self.obs_1d)
-
-        elif self._init_type == 'tier3':
-            # ------------------------------------------------------------------
-            # Should be the hardest we consider, perhaps all corners hidden.
-            # From a flat cloth (so no need for extra settling iterations) why
-            # not do a very high (random) pull? See how that works. Also since
-            # it's a flat cloth we can literally choose the (x,y) instead of
-            # picking a point at random.
-            # ------------------------------------------------------------------
-            old_iters_up = self.iters_up
-            self.iters_up = self.np_random.uniform(low=200, high=280)
-            logger.debug("Setting self.iters_up: {}.".format(self.iters_up))
-            lim = 0.25
-
-            # A high pull.
-            if self._delta_actions:
-                p0x = _randval_minabs(low=0.30, high=0.70)
-                p0y = _randval_minabs(low=0.30, high=0.70)
-                dx0 = _randval_minabs(low=-lim, high=lim, minabs=0.10)
-                dy0 = _randval_minabs(low=-lim, high=lim, minabs=0.10)
-                dx0 = _prevent_oob(p0x, dx0)
-                dy0 = _prevent_oob(p0y, dy0)
-                action0 = (p0x, p0y, dx0, dy0)
-            else:
-                raise NotImplementedError()
-            action0 = self._convert_action_to_clip_space(action0)
-            cloth_1d = self.step(action0, initialize=True)
-            cloth_3d_obs.extend(cloth_1d)
-
-            # Settle, and then re-assign to `self.iters_up`.
-            logger.debug("Let's continue simulating to finish the reset().")
-            for i in range(800):
-                self.cloth.update()
-                cloth_3d_obs.append(self.obs_1d)
-            self.iters_up = old_iters_up
+        if self._init_type == 'tier4':
+            logger.debug("Flat cloth")
+            pass
         else:
             raise ValueError(self._init_type)
 

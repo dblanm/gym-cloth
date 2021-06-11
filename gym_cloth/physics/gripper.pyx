@@ -41,6 +41,27 @@ class Gripper(object):
             curZ -= self.thickness
         self.grabbed_pts.extend(pts)
 
+    def grab_corner(self, corner):
+        """Grab a corner either 'top_right' or 'top_left'
+
+        More accurately, points within a small radius. We pin these points so
+        they won't be affected by gravity. Tuning the radius is critical!
+        """
+        if corner == 'top_left':
+            top_left_list = [0, 1]#, 25, 26]
+            for idx in top_left_list:
+                pt = self.cloth.pts[idx]
+                pt.pinned = True
+                self.grabbed_pts.append(pt)
+        elif corner == 'top_right':
+            top_left_list = [23, 24]#, 48, 49]
+            for idx in top_left_list:
+                pt = self.cloth.pts[idx]
+                pt.pinned = True
+                self.grabbed_pts.append(pt)
+        else:
+            raise ValueError("Wrong corner selected=", corner)
+
     def grab(self, double x, double y):
         """Grab points at (x,y).
 

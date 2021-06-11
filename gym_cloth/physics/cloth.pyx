@@ -114,7 +114,7 @@ class Cloth(object):
                                    identity_0=r,
                                    identity_1=c)
                         self.pts.append(pt)
-                    elif init_type == 'tier1' or init_type == 'tier3':
+                    elif init_type == 'tier1' or init_type == 'tier3' or init_type == 'tier4':
                         # ------------------------------------------------------
                         # Using r for x to make x stay fixed, y change more often. Should
                         # be OK, results in 184 render making the top surface brighter.
@@ -365,6 +365,10 @@ class Cloth(object):
         corr_x = goal_x - pt.px
         corr_y = goal_y - pt.py
         corr_z = goal_z - pt.pz
+        # Change this to not limit the position in X and Y
+        # pt.set_position_vec(pt.px + corr_x * (10. - p_friction),
+        #                     pt.py + corr_y * (10. - p_friction),
+        #                     pt.pz + corr_z * (1. - p_friction))
         pt.set_position_vec(pt.px + corr_x * (1. - p_friction),
                             pt.py + corr_y * (1. - p_friction),
                             pt.pz + corr_z * (1. - p_friction))
