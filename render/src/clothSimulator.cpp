@@ -59,7 +59,7 @@ void ClothSimulator::loadCollisionObjects(vector<CollisionObject *> *objects) { 
 void ClothSimulator::init() {
   // Initialize GUI
   initGUI(screen);
-  screen->setSize(default_window_size);
+//  screen->setSize(default_window_size);
 
   // Initialize camera
 
@@ -101,7 +101,7 @@ void ClothSimulator::init() {
   canonicalCamera.configure(camera_info, screen_w, screen_h);
 
   // added by @ryanhoque: rotate camera so you can see the fold better. adjust as necessary
-  camera.rotate_by(1, 0.0);   // Ryan used (2, 0.0)
+  camera.rotate_by(2, 0.0);   // Ryan used (2, 0.0)
   camera.move_forward(-0.5);  // Ryan used -0.5
 }
 

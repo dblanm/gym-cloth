@@ -60,7 +60,7 @@ void createGLContexts() {
   glfwWindowHint(GLFW_RESIZABLE, GL_TRUE);
 
   // Create a GLFWwindow object
-  window = glfwCreateWindow(800, 800, "Cloth Simulator", nullptr, nullptr);
+  window = glfwCreateWindow(1024, 800, "Cloth Simulator", nullptr, nullptr);
   if (window == nullptr) {
     std::cout << "Failed to create GLFW window" << std::endl;
     glfwTerminate();
@@ -391,7 +391,7 @@ int main(int argc, char **argv) {
   subscriber.connect("tcp://localhost:" + to_string(port));
   subscriber.setsockopt(ZMQ_SUBSCRIBE, "", 0);
 
-  glfwSetErrorCallback(error_callback);
+//  glfwSetErrorCallback(error_callback);
 
   createGLContexts();
 

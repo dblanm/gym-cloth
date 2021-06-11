@@ -85,8 +85,8 @@ void Camera::move_forward(const double dist) {
 }
 
 void Camera::rotate_by(const double dPhi, const double dTheta) {
-  phi = clamp(phi + dPhi, 0.0, (double)PI);
-  theta += dTheta;
+  this->phi = clamp(phi + dPhi, 0.0, (double)PI);
+  this->theta += dTheta;
   compute_position();
 }
 
@@ -96,8 +96,9 @@ void Camera::compute_position() {
     phi += EPS_F;
     sinPhi = sin(phi);
   }
-  const Vector3D dirToCamera(r * sinPhi * sin(theta), r * cos(phi),
-                             r * sinPhi * cos(theta));
+  //const Vector3D dirToCamera(r * sinPhi * sin(theta), r * cos(phi),
+  //                           r * sinPhi * cos(theta));
+  const Vector3D dirToCamera(r* sinPhi* sin(theta), r* cos(phi) , r * sinPhi);
   pos = targetPos + dirToCamera;
   Vector3D upVec(0, sinPhi > 0 ? 1 : -1, 0);
   Vector3D screenXDir = cross(upVec, dirToCamera);
