@@ -664,36 +664,50 @@ class UpActor(object):
     # This two are welded together body1 = "robot0:mocap" body2 = "B3_0"
     def __init__(self):
         self.current_action_idx = 0
+        self.threshold_reached = False
+        self.last_limit = 0
         self.grasp_pos = 0
 
     def get_action(self, obs, **kwargs):
+        obs = np.stack(obs)
+        cloth_points = obs[-1, :, 0:3]
+        top_left = cloth_points[0]
+        top_right = cloth_points[24]
+        bot_left = cloth_points[600]
+        bot_right = cloth_points[624]
+        dist_x = bot_right[0] - top_right[0]
+        dist_y = bot_right[1] - top_right[1]
+        dist_z = bot_right[2] - top_right[2]
+        threshold = 0.3
+        within_threshold = np.logical_and(dist_x>-threshold, dist_x<threshold)
         limit_1 = 7
         limit_2 = 14
         limit_3 = 35
         action = np.array([0.0, 0.0, 0.0])
-        if self.current_action_idx >= limit_1 and self.current_action_idx < limit_2:
-            action[0] = 0.01
-            action[1] = 0.00
-            # action[0] = -0.4
-            # action[1] = 0.4
-            # action[3] = 1
+        if self.current_action_idx >= limit_1 and not within_threshold:
+            action[0] = np.clip(dist_x, -0.007, 0.007)
+            action[1] = np.clip(dist_y, -0.007, 0.007)
+            # action[2] = -0.001
 
-        if self.current_action_idx < limit_1:
+        if self.current_action_idx < limit_1:  # Lift up
             action[0] = 0
             action[1] = 0
             action[2] = 0.007
-        elif self.current_action_idx > limit_3 and self.current_action_idx < (limit_3 + limit_1):
+
+        if within_threshold and self.current_action_idx < self.last_limit+(limit_1-2):
             action[0] = 0
             action[1] = 0
-            action[2] = -0.01
+            action[2] = -0.002
+            self.threshold_reached = True
 
+        if not self.threshold_reached:
+            self.last_limit = self.current_action_idx
         self.current_action_idx += 1
 
         return action
 
     def reset(self):
         self.current_action_idx = 0
-
 
 def plot_2d(obs, num_steps, tier):
     fig = plt.figure()
@@ -752,6 +766,7 @@ def test_time_sequence(cloth_sequence):
         actions_t = actions[t]
         max_action = actions_t.max()
         min_action = actions_t.min()
+        # In case there was an action
         if max_action != 0. or min_action != 0.:
             grip_idx = np.where(grip_points[t] != 0.)[0]
             acted_nodes = delta_cloth[t, grip_idx, :]
@@ -797,11 +812,11 @@ def run(args, policy):
     # args.cfg_file here, but then it's immediately loaded by ClothEnv. When
     # env.reset() is called, it uses the ALREADY loaded parameters, and does
     # NOT re-query the file again for parameters (that'd be bad!).
-    env = ClothEnv(args.cfg_file)
+    env = DiagonalClothEnv(args.cfg_file)
     env.seed(seed)
     env.render(filepath=args.render_path)
-    policy.set_env_cfg(env, cfg)
-    # policy = UpActor()
+    # policy.set_env_cfg(env, cfg)
+    policy = UpActor()
     # Book-keeping.
     num_episodes = 0
     stats_all = []
@@ -817,20 +832,20 @@ def run(args, policy):
         obs, obs_1d = env.reset()
         if cloth_tier == 1:
             cloth_obs.extend(obs_1d)
-        # cloth_npy = np.array(cloth_obs)
-        # test_time_sequence(obs_1d)
-        # plot_2d(obs_1d, 0, cloth_tier)
+
         # Go through one episode and put information in `stats_ep`.
         # Don't forget the first obs, since we need t _and_ t+1.
         stats_ep = defaultdict(list)
         stats_ep['obs'].append(obs)
-
+        reward_list = []
         done = False
         num_steps = 0
-
+        cloth_updates = 50
         while not done:
-            action = policy.get_action(obs, t=num_steps)
-            obs, rew, done, info = env.step(action)
+            action = policy.get_action(obs_1d, t=num_steps)
+            if num_steps > 25:
+                cloth_updates = 1000
+            obs, rew, done, info = env.step(action, cloth_updates=cloth_updates)
             stats_ep['obs'].append(obs)
             stats_ep['rew'].append(rew)
             stats_ep['act'].append(action)
@@ -839,6 +854,7 @@ def run(args, policy):
             obs_1d = info['obs_1d']
             test_time_sequence(obs_1d)
             num_steps += 1
+            reward_list.append(rew)
             cloth_obs.extend(obs_1d)
             plot_2d(obs_1d, num_steps, cloth_tier)
             if num_steps > 80:
