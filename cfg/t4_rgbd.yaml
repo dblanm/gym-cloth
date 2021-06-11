@@ -30,29 +30,24 @@ simulation_steps: 30        # Actually an important hyperparameter to match with
 # ------------------------------------------------------------------------------
 
 env:
-    max_actions: 10         # Max number of actions per episode. This should be on the order of 5 to 50.
+    max_actions: 50         # Max number of actions per episode. This should be on the order of 5 to 50.
     max_z_threshold: 5      # For now, we get high reward if all points are below this threshold (should fix)
-#    iters_up: 50            # For pulling cloth upwards (only z changes)
-#    iters_up_rest: 80       # Resting after pulling cloth upwards.
-#    iters_pull_max: 400     # Max number to pull; actions take a fraction of this.
-#    iters_grip_rest: 300    # No-ops to let cloth settle while being gripped --- needed for realism
-#    iters_rest: 1000        # No-ops to let the cloth rest (do larger to test if folds are stable...)
     iters_up: 50            # For pulling cloth upwards (only z changes)
-    iters_up_rest: 50       # Resting after pulling cloth upwards.
+    iters_up_rest: 80       # Resting after pulling cloth upwards.
     iters_pull_max: 400     # Max number to pull; actions take a fraction of this.
-    iters_grip_rest: 50    # No-ops to let cloth settle while being gripped --- needed for realism
-    iters_rest: 350        # No-ops to let the cloth rest (do larger to test if folds are stable...)
+    iters_grip_rest: 300    # No-ops to let cloth settle while being gripped --- needed for realism
+    iters_rest: 1000        # No-ops to let the cloth rest (do larger to test if folds are stable...)
     updates_per_move: 1     # Should really be 1, ignore this?
     reduce_factor: 0.0020   # Multiply raw directions by this to make actions smaller
     grip_radius: 0.003      # alternative: .003, larger radius means we grab more points
-    reward_type: 'coverage-delta' # See `ClothEnv` for possible types.
+    reward_type: 'folding' # See `ClothEnv` for possible types.
     force_grab: False       # Should ONLY be true for evaluation, never for training.
     clip_act_space: True    # Whether we assume our actions should be in [-1,1], might make it easier for RL
     delta_actions: True     # If True, our action for length/angle are deltas in x and y space.
     obs_type: 'blender'     # '1d' or 'blender'
     oracle_reveal: 'False'  # If 'True', we compute the occlusion vector every time Blender is called (should only be True if using corner revealing demonstrator)
     use_depth: 'False'      # If 'True', we use depth images for the training process instead of color images
-    use_dom_rand: 'True'    # If 'True', we use domain randomization (camera pose, color, etc.)
+    use_dom_rand: 'False'    # If 'True', we use domain randomization (camera pose, color, etc.)
     use_rgbd: 'True'
 
 # ------------------------------------------------------------------------------
@@ -64,7 +59,7 @@ env:
 # ------------------------------------------------------------------------------
 
 init:
-    type: 'tier1'               # Options: tier1, tier2, tier3
+    type: 'tier4'               # Options: tier1, tier2, tier3
     debug_matplotlib: False     # If we show matplotlib video of the initialization
     render_opengl: True # If we show opengl rendering
 
